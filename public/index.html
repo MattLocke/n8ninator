@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#11100f" />
+    <meta name="description" content="n8ninator — a local-first n8n coding agent." />
+    <title>n8ninator</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span><i></i><b></b>
+          </div>
+          <div><div class="brand">n8ninator</div><div class="brand-sub">local workflow engineer</div></div>
+        </div>
+
+        <button class="new-chat" id="new-chat"><span>＋</span> New task</button>
+        <div class="section-label">Recent</div>
+        <nav class="history-list" id="history-list" aria-label="Recent tasks"></nav>
+
+        <div class="sidebar-bottom">
+          <div class="connection-stack">
+            <button class="connection-card" id="ollama-card">
+              <span class="status-dot" id="ollama-dot"></span>
+              <span><strong>Ollama</strong><small id="ollama-label">Checking…</small></span>
+            </button>
+            <button class="connection-card" id="mcp-card">
+              <span class="status-dot" id="mcp-dot"></span>
+              <span><strong>n8n MCP</strong><small id="mcp-label">Not connected</small></span>
+            </button>
+          </div>
+          <button class="settings-button" id="settings-open"><span>⚙</span> Settings</button>
+        </div>
+      </aside>
+
+      <main class="main-pane">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Toggle sidebar">☰</button>
+          <button class="workspace-pill" id="workspace-pill" title="Open workspace settings">
+            <span class="folder-icon">⌁</span><span id="workspace-name">Workspace</span><span class="chevron">›</span>
+          </button>
+          <div class="topbar-actions">
+            <label class="model-control">
+              <span class="sr-only">Model</span>
+              <select id="model-select" aria-label="Local model"></select>
+            </label>
+            <div class="privacy-chip"><span>●</span> On this Mac</div>
+          </div>
+        </header>
+
+        <section class="chat-scroll" id="chat-scroll">
+          <div class="welcome" id="welcome">
+            <div class="welcome-orbit" aria-hidden="true"><span></span><i></i><b></b></div>
+            <p class="eyebrow">Your n8n build partner</p>
+            <h1>What should we<br /><em>automate?</em></h1>
+            <p class="welcome-copy">I can inspect your workspace, write and validate workflow JSON, debug Code nodes, research current docs, and work directly with your n8n instance through MCP.</p>
+            <div class="starter-grid">
+              <button class="starter" data-prompt="Inspect this workspace and give me a concise map of the n8n workflows, custom nodes, tests, and likely risks. Do not edit anything."><span>⌘</span><strong>Audit this workspace</strong><small>Map workflows, code, and risks</small></button>
+              <button class="starter" data-prompt="Help me build a production-ready n8n workflow. Start by asking only for the minimum missing details, then inspect the workspace before making changes."><span>↗</span><strong>Build a workflow</strong><small>From a plain-English brief</small></button>
+              <button class="starter" data-prompt="Use n8n MCP to find the most recent failed execution, diagnose the root cause, and propose a fix. Do not mutate or execute anything until I approve."><span>◎</span><strong>Debug an execution</strong><small>Trace failures through n8n MCP</small></button>
+              <button class="starter" data-prompt="Review the n8n Code nodes in this workspace for item-shape errors, null handling, item-linking issues, and unsupported dependencies. Make no changes yet."><span>{ }</span><strong>Review Code nodes</strong><small>Catch n8n-specific mistakes</small></button>
+            </div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </section>
+
+        <footer class="composer-wrap">
+          <div class="composer-status" id="composer-status"></div>
+          <form class="composer" id="composer">
+            <textarea id="prompt" rows="1" placeholder="Ask n8ninator to build, fix, or explain…" aria-label="Message n8ninator"></textarea>
+            <div class="composer-bottom">
+              <div class="context-badges">
+                <button type="button" class="context-badge" id="workspace-context"><span>⌁</span> Workspace</button>
+                <button type="button" class="context-badge muted" id="mcp-context"><span>●</span> n8n MCP</button>
+              </div>
+              <button class="send-button" id="send" type="submit" aria-label="Send message">↑</button>
+              <button class="stop-button hidden" id="stop" type="button" aria-label="Stop generation">■</button>
+            </div>
+          </form>
+          <p class="local-note">Local model output can be wrong. n8ninator asks before writes, commands, and n8n mutations.</p>
+        </footer>
+      </main>
+    </div>
+
+    <div class="modal-backdrop hidden" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <section class="settings-panel">
+        <header class="settings-header"><div><p class="eyebrow">Local configuration</p><h2 id="settings-title">Settings</h2></div><button id="settings-close" aria-label="Close settings">×</button></header>
+        <div class="settings-body">
+          <section class="settings-section">
+            <div class="section-heading"><div><h3>Workspace</h3><p>The only directory the agent can read or change.</p></div></div>
+            <label class="field"><span>Absolute path</span><input id="setting-workspace" type="text" spellcheck="false" /></label>
+          </section>
+          <section class="settings-section">
+            <div class="section-heading"><div><h3>Local model</h3><p>Optimized defaults for an Apple M4 Pro with 24 GB unified memory.</p></div></div>
+            <div class="model-cards" id="model-cards"></div>
+            <div class="field-row">
+              <label class="field"><span>Ollama URL</span><input id="setting-ollama" type="url" spellcheck="false" /></label>
+              <label class="field compact"><span>Context</span><select id="setting-context"><option value="8192">8K</option><option value="16384">16K</option><option value="32768">32K</option><option value="65536">64K</option></select></label>
+            </div>
+            <div class="field-row">
+              <label class="field"><span>Reasoning effort</span><select id="setting-reasoning"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+              <label class="field"><span>Approval mode</span><select id="setting-approval"><option value="ask">Ask before changes</option><option value="read-only">Read only</option><option value="auto">Auto approve</option></select></label>
+            </div>
+            <div class="pull-row"><button class="secondary-button" id="pull-model">Download selected model</button><div class="pull-progress" id="pull-progress"></div></div>
+          </section>
+          <section class="settings-section mcp-section">
+            <div class="section-heading"><div><h3>n8n MCP</h3><p>Connect to n8n’s instance-level MCP server for authoritative workflow tools.</p></div><label class="switch"><input id="setting-mcp-enabled" type="checkbox" /><span></span></label></div>
+            <label class="field"><span>Server URL</span><input id="setting-mcp-url" type="url" placeholder="http://localhost:5678/mcp-server/http" spellcheck="false" /></label>
+            <label class="field"><span>Access token <i id="token-state"></i></span><input id="setting-mcp-token" type="password" placeholder="Leave blank to keep the saved token" autocomplete="off" /></label>
+            <p class="field-help">The token is stored only in <code>~/.n8ninator/settings.json</code> with owner-only permissions. n8ninator itself has no account or login.</p>
+            <div class="test-row"><button class="secondary-button" id="test-mcp">Test connection</button><span id="test-mcp-result"></span></div>
+          </section>
+          <section class="settings-section prompt-section">
+            <div class="section-heading"><div><h3>n8n expert prompt</h3><p>The repository includes an editable system prompt with n8n-specific safety and validation rules.</p></div><button class="text-button" id="view-prompt">View prompt</button></div>
+            <pre class="prompt-preview hidden" id="prompt-preview"></pre>
+          </section>
+        </div>
+        <footer class="settings-footer"><span id="settings-message"></span><div><button class="secondary-button" id="settings-cancel">Cancel</button><button class="primary-button" id="settings-save">Save settings</button></div></footer>
+      </section>
+    </div>
+
+    <div class="toast-stack" id="toasts" aria-live="polite"></div>
+    <script src="/vendor/marked.js"></script>
+    <script src="/vendor/purify.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
