@@ -15,6 +15,7 @@ It has no accounts, cloud backend, telemetry, or hosted model dependency. The UI
 - Discover and call the official n8n MCP tools dynamically instead of relying on a stale hard-coded schema.
 - Ask before file writes, shell commands, workflow changes, executions, publishing, archiving, or other n8n mutations.
 - Stream answers, reasoning traces, tool calls, results, model downloads, and approvals in the browser.
+- Audit every candidate final answer against the original goal and real tool evidence, automatically continuing when the model stops at planning or partial work.
 - Keep recent chats in the browser's local storage. Nothing is sent to a n8ninator service.
 
 ## Quick start on a Mac
@@ -137,6 +138,21 @@ See [SECURITY.md](SECURITY.md) for the trust model and limitations.
 
 Set `N8NINATOR_PROMPT=/absolute/path/to/prompt.md` before launch to use a customized prompt.
 
+## Follow-through and goal checks
+
+Local models sometimes inspect a task, explain the required work, and then emit a final-looking response before performing it. n8ninator does not treat “the model stopped calling tools” as proof of completion.
+
+Every candidate final response goes through a separate structured completion review using the same local model at low reasoning effort. The controller receives:
+
+- the conversation leading to the current request;
+- successful, failed, and denied tool evidence from the run;
+- the candidate final response;
+- strict rules distinguishing an answer-only question, completed action, unfinished work, and a genuine blocker.
+
+If work remains, the UI displays **Goal check: continuing**, removes the premature draft, tells the agent exactly what is missing, and resumes the tool loop. The agent may stop only when the review passes, a concrete blocker requires the user, or the bounded agent-step safety limit is reached. If structured review is unavailable, a conservative local fallback still rejects empty responses, future-tense plans, and action claims without action evidence.
+
+Exact file-content requests get an additional deterministic gate. `write_file_lines` lets smaller models express content as `lines[]` plus an explicit final-newline flag without fragile escaping. The `verify_file` tool then compares exact content or line arrays and separately checks final-newline state, byte count, line endings, and SHA-256. A request involving exact file whitespace cannot pass until verification returns `exactMatch=true`; this prevents a model from confusing the literal characters `\\n` with a real newline.
+
 ## Architecture
 
 ```text
@@ -146,6 +162,7 @@ Browser UI on 127.0.0.1:3210
 Local TypeScript agent harness
         ├── safe workspace tools
         ├── approval broker
+        ├── evidence ledger + completion controller
         ├── public web fetcher
         ├── local workflow validator
         ├── Ollama chat + native tool calls
@@ -166,7 +183,7 @@ npm run build     # compile to dist/
 npm run verify    # check + test + build
 ```
 
-The test suite includes a real local Streamable HTTP MCP mock that verifies bearer authentication, tool discovery and calls, mutation classification, workspace containment and secret-file blocking, workflow validation, and server routes.
+The test suite includes a real local Streamable HTTP MCP mock that verifies bearer authentication, tool discovery and calls, mutation classification, workspace containment and secret-file blocking, workflow validation, and server routes. A follow-through regression test deliberately makes a mock model stop at “I will create the file,” confirms that the goal gate rejects it, and proves the harness resumes and writes the requested artifact before accepting completion.
 
 Environment overrides:
 

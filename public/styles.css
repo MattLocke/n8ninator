@@ -140,6 +140,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-event.error .tool-icon { color: var(--red); background: rgba(255,116,116,.09); }
 .tool-event.running .tool-icon { color: var(--amber); animation: pulse 1s infinite; }
 .tool-detail { margin: 0; max-height: 140px; padding: 0 10px 10px 38px; overflow: auto; color: var(--dim); white-space: pre-wrap; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.goal-event { padding: 10px 11px; border: 1px solid rgba(246,199,104,.22); border-radius: 10px; background: rgba(246,199,104,.04); }
+.goal-event.complete { border-color: rgba(104,211,145,.2); background: rgba(104,211,145,.04); }
+.goal-event.blocked { border-color: rgba(255,116,116,.22); background: rgba(255,116,116,.04); }
+.goal-event-head { display: flex; align-items: center; gap: 8px; }
+.goal-event-head > span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: rgba(246,199,104,.09); color: var(--amber); font-size: 11px; }
+.goal-event.complete .goal-event-head > span { background: rgba(104,211,145,.09); color: var(--green); }
+.goal-event.blocked .goal-event-head > span { background: rgba(255,116,116,.09); color: var(--red); }
+.goal-event-head strong { font-size: 11px; }
+.goal-event-head small { margin-left: auto; color: var(--dim); font-size: 9px; }
+.goal-event p { margin: 6px 0 0 28px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.goal-event ul { margin: 6px 0 0 42px; padding: 0; color: var(--dim); font-size: 10px; line-height: 1.45; }
 .approval-event { padding: 11px; border-color: rgba(246,199,104,.24); background: rgba(246,199,104,.045); }
 .approval-copy { display: flex; align-items: flex-start; gap: 9px; }
 .approval-copy span { color: var(--amber); }

@@ -128,6 +128,14 @@
   function toolEventsHtml(events) {
     if (!Array.isArray(events) || !events.length) return "";
     return `<div class="tool-stack">${events.map((event) => {
+      if (event.kind === "goal") {
+        const status = event.blocked ? "blocked" : event.complete ? "complete" : "continuing";
+        const title = event.blocked ? "Goal check: blocked" : event.complete ? "Goal check passed" : "Goal check: continuing";
+        const missing = Array.isArray(event.missing) && event.missing.length
+          ? `<ul>${event.missing.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+          : "";
+        return `<div class="goal-event ${status}"><div class="goal-event-head"><span>${event.complete ? "✓" : event.blocked ? "!" : "↻"}</span><strong>${title}</strong><small>check ${escapeHtml(event.check || 1)}</small></div><p>${escapeHtml(event.summary || "")}</p>${missing}</div>`;
+      }
       if (event.kind === "approval") {
         const pending = event.status === "pending";
         return `<div class="tool-event approval-event ${pending ? "" : event.status === "approved" ? "ok" : "error"}">
@@ -281,6 +289,13 @@
     if (event.type === "status") setComposerStatus(event.message || "Working…", true);
     if (event.type === "thinking") assistant.thinking = (assistant.thinking || "") + (event.delta || "");
     if (event.type === "delta") assistant.content += event.delta || "";
+    if (event.type === "content_reset") assistant.content = "";
+    if (event.type === "goal_review") {
+      assistant.events.push({ kind: "goal", complete: event.complete, blocked: event.blocked, summary: event.summary, missing: event.missing, check: event.check });
+      if (event.complete) setComposerStatus("Goal check passed.");
+      else if (event.blocked) setComposerStatus("Goal check found a blocker.");
+      else setComposerStatus(event.nextAction || "Goal check found unfinished work. Continuing…", true);
+    }
     if (event.type === "tool_start") assistant.events.push({ kind: "tool", tool: event.tool, arguments: event.arguments, status: "running" });
     if (event.type === "tool_result") {
       const match = [...assistant.events].reverse().find((item) => item.kind === "tool" && item.tool === event.tool && item.status === "running");

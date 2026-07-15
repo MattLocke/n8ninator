@@ -22,6 +22,12 @@ export interface StreamedAssistantMessage {
   metrics: Record<string, unknown>;
 }
 
+interface OllamaChatResponse {
+  message?: {
+    content?: string;
+  };
+}
+
 function baseUrl(value: string): string {
   return value.replace(/\/$/, "");
 }
@@ -137,4 +143,40 @@ export async function streamOllamaChat(
     };
   });
   return { role: "assistant", content, thinking, tool_calls: toolCalls, metrics };
+}
+
+export async function generateOllamaJson<T>(
+  settings: AppSettings,
+  messages: ChatMessage[],
+  schema: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<T> {
+  const body: Record<string, unknown> = {
+    model: settings.model,
+    messages,
+    stream: false,
+    format: schema,
+    keep_alive: "10m",
+    options: {
+      num_ctx: Math.min(settings.contextLength, 16_384),
+      ...(/gpt-oss/i.test(settings.model) ? {} : { temperature: 0 }),
+    },
+  };
+  if (/gpt-oss/i.test(settings.model)) body.think = "low";
+  else if (/qwen3/i.test(settings.model)) body.think = true;
+  const response = await fetch(`${baseUrl(settings.ollamaUrl)}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) throw await responseError(response);
+  const payload = await response.json() as OllamaChatResponse;
+  const content = payload.message?.content?.trim();
+  if (!content) throw new Error("Goal review did not return JSON content");
+  try {
+    return JSON.parse(content) as T;
+  } catch (error) {
+    throw new Error(`Goal review returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

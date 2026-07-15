@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { reviewGoal, type GoalReview, type GoalReviewer, type ToolEvidence } from "./goal-review.js";
 import { N8nMcpManager, mcpToolNeedsApproval } from "./mcp-manager.js";
 import { streamOllamaChat } from "./ollama.js";
 import type { AgentEvent, AppSettings, ChatMessage, OllamaToolCall, ToolDefinition } from "./types.js";
 import { compactToolArguments, executeLocalTool, LOCAL_TOOL_DEFINITIONS, localToolNeedsApproval } from "./workspace-tools.js";
 
 type EventWriter = (event: AgentEvent) => void;
+
+export interface AgentDependencies {
+  streamChat?: typeof streamOllamaChat;
+  goalReviewer?: GoalReviewer;
+}
 
 interface PendingApproval {
   resolve: (approved: boolean) => void;
@@ -92,6 +98,22 @@ async function executeTool(name: string, args: Record<string, unknown>, settings
   return await executeLocalTool(name, args, settings.workspace);
 }
 
+function completionFeedback(review: GoalReview): string {
+  const missing = review.missing.length ? review.missing.map((item) => `- ${item}`).join("\n") : "- The requested outcome is not yet evidenced.";
+  return `## Completion controller: continue working
+
+Your previous response was a draft, not a final answer. The harness checked it against the user's goal and found unfinished work.
+
+Review: ${review.summary}
+
+Missing:
+${missing}
+
+Next action: ${review.nextAction || "Take the next concrete tool-backed step and verify it."}
+
+Do not restate the plan or promise future work. Continue now using the available tools. Only produce another final response after the requested outcome is complete or you have a concrete blocker that requires the user.`;
+}
+
 export async function runAgent(options: {
   settings: AppSettings;
   history: ChatMessage[];
@@ -99,8 +121,11 @@ export async function runAgent(options: {
   approvals: ApprovalBroker;
   signal: AbortSignal;
   send: EventWriter;
+  dependencies?: AgentDependencies;
 }): Promise<void> {
   const { settings, mcp, approvals, signal, send } = options;
+  const streamChat = options.dependencies?.streamChat ?? streamOllamaChat;
+  const goalReviewer = options.dependencies?.goalReviewer ?? reviewGoal;
   let mcpError = "";
   if (settings.n8nMcp.enabled) {
     send({ type: "status", message: "Connecting to n8n MCP…" });
@@ -121,11 +146,14 @@ export async function runAgent(options: {
 
   let combinedContent = "";
   let finalMetrics: Record<string, unknown> = {};
+  let goalChecks = 0;
+  let lastReview: GoalReview | undefined;
+  const evidence: ToolEvidence[] = [];
   for (let step = 1; step <= settings.maxAgentSteps; step++) {
     if (signal.aborted) throw new Error("Generation stopped");
     let thinkingStarted = false;
     send({ type: "status", message: step === 1 ? "Reasoning locally…" : `Continuing agent step ${step}…`, step });
-    const response = await streamOllamaChat(
+    const response = await streamChat(
       settings,
       messages,
       tools,
@@ -150,8 +178,41 @@ export async function runAgent(options: {
       tool_calls: response.tool_calls,
     });
     if (!response.tool_calls.length) {
-      send({ type: "done", content: combinedContent.trim(), metrics: finalMetrics, steps: step });
-      return;
+      goalChecks += 1;
+      send({ type: "status", message: "Checking the original goal against completed work…", step });
+      lastReview = await goalReviewer({
+        settings,
+        history: options.history,
+        candidate: response.content,
+        evidence,
+        signal,
+      });
+      send({
+        type: "goal_review",
+        complete: lastReview.complete,
+        blocked: lastReview.blocked,
+        summary: lastReview.summary,
+        missing: lastReview.missing,
+        nextAction: lastReview.nextAction,
+        source: lastReview.source,
+        check: goalChecks,
+        step,
+      });
+      if (lastReview.complete || lastReview.blocked) {
+        send({
+          type: "done",
+          content: combinedContent.trim(),
+          metrics: finalMetrics,
+          steps: step,
+          goalChecks,
+          blocked: lastReview.blocked,
+        });
+        return;
+      }
+      combinedContent = "";
+      send({ type: "content_reset", reason: "Goal review found unfinished work.", step });
+      messages.push({ role: "system", content: completionFeedback(lastReview) });
+      continue;
     }
 
     for (const call of response.tool_calls) {
@@ -181,8 +242,10 @@ export async function runAgent(options: {
         }
       }
       send({ type: "tool_result", tool: displayName, ok, result: preview(result), step });
+      evidence.push({ tool: displayName, ok, arguments: compactToolArguments(args), result: preview(result) });
       messages.push({ role: "tool", tool_name: name, content: result });
     }
   }
-  throw new Error(`Agent reached the ${settings.maxAgentSteps}-step safety limit. Ask it to continue with a narrower task.`);
+  const unresolved = lastReview?.missing.length ? ` Still missing: ${lastReview.missing.join("; ")}` : "";
+  throw new Error(`Agent reached the ${settings.maxAgentSteps}-step safety limit before the goal check passed.${unresolved} Continue with a narrower task or raise the step limit.`);
 }
