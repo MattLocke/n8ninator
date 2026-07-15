@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import { ApprovalBroker, runAgent } from "../src/agent.js";
-import { conservativeGoalReview, reviewGoal, type GoalReview, type GoalReviewer } from "../src/goal-review.js";
+import { conservativeGoalReview, requiresExactFileVerification, reviewGoal, type GoalReview, type GoalReviewer } from "../src/goal-review.js";
 import { N8nMcpManager } from "../src/mcp-manager.js";
 import { streamOllamaChat } from "../src/ollama.js";
 import type { AgentEvent, AppSettings, OllamaToolCall } from "../src/types.js";
@@ -174,6 +174,62 @@ test("model watchdog preserves partial output instead of duplicating it", async 
   assert.equal(events.filter((event) => event.retrying === true).length, 0);
 });
 
+test("agent caches a large tool result and lets the model search only the relevant chunk", async (t) => {
+  const workspace = await mkdtemp(resolve(tmpdir(), "n8ninator-large-result-"));
+  const mcp = new N8nMcpManager();
+  await writeFile(resolve(workspace, "large.txt"), `${"x".repeat(14_000)}TARGET_NODE_42${"y".repeat(4_000)}\n`);
+  t.after(async () => { await mcp.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  let chatCalls = 0;
+  const streamChat: typeof streamOllamaChat = async (_settings, messages, _tools, _signal, _onThinking, onContent) => {
+    chatCalls += 1;
+    if (chatCalls === 1) {
+      return {
+        role: "assistant",
+        content: "",
+        thinking: "",
+        tool_calls: [{ type: "function", function: { name: "read_file", arguments: { path: "large.txt" } } }],
+        metrics: {},
+      };
+    }
+    const lastTool = [...messages].reverse().find((message) => message.role === "tool");
+    assert.ok(lastTool);
+    if (chatCalls === 2) {
+      assert.ok(lastTool.content.length <= 8_000, "large result should not be sent inline");
+      const handle = lastTool.content.match(/Handle: (result_[a-z0-9]+)/)?.[1];
+      assert.ok(handle, "large result should include a cache handle");
+      return {
+        role: "assistant",
+        content: "",
+        thinking: "",
+        tool_calls: [{ type: "function", function: { name: "inspect_tool_result", arguments: { id: handle, query: "TARGET_NODE_42" } } }],
+        metrics: {},
+      };
+    }
+    assert.match(lastTool.content, /TARGET_NODE_42/);
+    onContent("Found the requested node without reloading the large result.");
+    return { role: "assistant", content: "Found the requested node without reloading the large result.", thinking: "", tool_calls: [], metrics: {} };
+  };
+  const events: AgentEvent[] = [];
+
+  await runAgent({
+    settings: settings(workspace),
+    history: [{ role: "user", content: "Find TARGET_NODE_42 in large.txt." }],
+    mcp,
+    approvals: new ApprovalBroker(),
+    signal: new AbortController().signal,
+    send: (event) => events.push(event),
+    dependencies: {
+      streamChat,
+      goalReviewer: async () => ({ complete: true, blocked: false, summary: "Found it.", missing: [], nextAction: "", source: "model" }),
+    },
+  });
+
+  assert.equal(chatCalls, 3);
+  assert.ok(events.some((event) => event.type === "status" && event.contextManaged === true));
+  assert.ok(events.some((event) => event.type === "tool_start" && event.tool === "inspect_tool_result"));
+});
+
 test("conservative goal review does not accept planning as action completion", () => {
   const actionReview = conservativeGoalReview({
     history: [{ role: "user", content: "Please update the workflow file." }],
@@ -202,4 +258,9 @@ test("exact file goals require deterministic verification before semantic review
   assert.equal(result.complete, false);
   assert.equal(result.source, "deterministic");
   assert.match(result.nextAction, /write_file_lines/);
+});
+
+test("an exact reply after reading a file is not mistaken for an exact file-write goal", () => {
+  assert.equal(requiresExactFileVerification("Read package-lock.json, then reply with exactly CACHE_OK."), false);
+  assert.equal(requiresExactFileVerification("Create exact.txt containing exactly one line and a final newline."), true);
 });

@@ -16,6 +16,7 @@ It has no accounts, cloud backend, telemetry, or hosted model dependency. The UI
 - Ask before file writes, shell commands, workflow changes, executions, publishing, archiving, or other n8n mutations.
 - Stream answers, reasoning traces, tool calls, results, model downloads, and approvals in the browser.
 - Show elapsed-time liveness updates while Ollama is silent, automatically retry a request that stalls before producing output, and stop with a concrete recovery message instead of waiting forever.
+- Keep large MCP workflow responses out of the main prompt, with an in-memory cache the model can search or read in bounded chunks.
 - Audit every candidate final answer against the original goal and real tool evidence, automatically continuing when the model stops at planning or partial work.
 - Keep recent chats in the browser's local storage. Nothing is sent to a n8ninator service.
 
@@ -154,6 +155,12 @@ If work remains, the UI displays **Goal check: continuing**, removes the prematu
 
 Exact file-content requests get an additional deterministic gate. `write_file_lines` lets smaller models express content as `lines[]` plus an explicit final-newline flag without fragile escaping. The `verify_file` tool then compares exact content or line arrays and separately checks final-newline state, byte count, line endings, and SHA-256. A request involving exact file whitespace cannot pass until verification returns `exactMatch=true`; this prevents a model from confusing the literal characters `\\n` with a real newline.
 
+## Large MCP workflow results
+
+Large workflow-detail responses can exceed the practical prompt budget of a local model even when the configured context window appears large enough. n8ninator automatically keeps tool results over 8,000 characters in a per-task in-memory cache. The model receives a bounded beginning/end excerpt and a temporary handle, then uses `inspect_tool_result` to search for the relevant workflow name, node, ID, expression, or field. Sequential reads are also available when a search is insufficient.
+
+This prevents every later model step from reprocessing an entire workflow payload. Cached results live only for the active request, are never written to disk, and expire when that request ends.
+
 ## Architecture
 
 ```text
@@ -211,7 +218,7 @@ Open Settings and use **Download model**, or run `ollama pull gpt-oss:20b`.
 
 **The model appears stuck on “Waiting for local model…”**
 
-n8ninator reports how long Ollama has been quiet. After two minutes without any output it automatically restarts that model step once. If the retry also stalls, restart Ollama or select `qwen2.5-coder:14b`. If output had already started, n8ninator preserves the partial response and stops after one quiet minute rather than replaying and duplicating text.
+n8ninator reports how long Ollama has been quiet. After two minutes without any output it automatically restarts that model step once. Large MCP results are cached and searched in bounded chunks before that next model step, which avoids the most common post-workflow-lookup context stall. If the retry also stalls, restart Ollama or select `qwen2.5-coder:14b`. If output had already started, n8ninator preserves the partial response and stops after one quiet minute rather than replaying and duplicating text.
 
 **The Mac swaps or becomes unresponsive**  
 Quit memory-heavy apps, reduce context to 8K, or use `qwen2.5-coder:14b`. Avoid Qwen3-Coder 30B on a 24 GB machine when reliability matters.

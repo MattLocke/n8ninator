@@ -103,10 +103,12 @@ function hasActionEvidence(evidence: ToolEvidence[]): boolean {
   return evidence.some((item) => item.ok && /(^| · )(write_file|replace_in_file|run_command|create_|update_|delete_|archive_|publish_|unpublish_|execute_|test_workflow|add_|rename_)/i.test(item.tool));
 }
 
-function requiresExactFileVerification(request: string): boolean {
+export function requiresExactFileVerification(request: string): boolean {
   const exactness = /\b(exactly|exact content|byte[- ]for[- ]byte|newline|line ending|whitespace)\b/i.test(request);
   const fileTarget = /\bfile\b/i.test(request) || /\.[a-z0-9]{1,10}\b/i.test(request);
-  return exactness && fileTarget;
+  const fileContentAction = /\b(create|write|edit|update|replace|save|make)\b[^.!?\n]{0,120}\b(file|contents?|lines?|newline|whitespace|\.[a-z0-9]{1,10})\b/i.test(request)
+    || /\b(file|\.[a-z0-9]{1,10})\b[^.!?\n]{0,120}\b(contain|contents?|exact content|byte[- ]for[- ]byte|newline|line ending|whitespace)\b/i.test(request);
+  return exactness && fileTarget && fileContentAction;
 }
 
 function hasPassingExactFileVerification(evidence: ToolEvidence[]): boolean {

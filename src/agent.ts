@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { reviewGoal, type GoalReview, type GoalReviewer, type ToolEvidence } from "./goal-review.js";
 import { N8nMcpManager, mcpToolNeedsApproval } from "./mcp-manager.js";
 import { streamOllamaChat } from "./ollama.js";
+import { INSPECT_TOOL_RESULT_DEFINITION, INSPECT_TOOL_RESULT_NAME, ToolResultCache } from "./tool-result-cache.js";
 import type { AgentEvent, AppSettings, ChatMessage, OllamaToolCall, ToolDefinition } from "./types.js";
 import { compactToolArguments, executeLocalTool, LOCAL_TOOL_DEFINITIONS, localToolNeedsApproval } from "./workspace-tools.js";
 
@@ -110,7 +111,8 @@ function needsApproval(name: string, mcp: N8nMcpManager): boolean {
   return remoteName ? mcpToolNeedsApproval(remoteName) : false;
 }
 
-async function executeTool(name: string, args: Record<string, unknown>, settings: AppSettings, mcp: N8nMcpManager): Promise<string> {
+async function executeTool(name: string, args: Record<string, unknown>, settings: AppSettings, mcp: N8nMcpManager, resultCache: ToolResultCache): Promise<string> {
+  if (name === INSPECT_TOOL_RESULT_NAME) return resultCache.inspect(args);
   if (mcp.remoteName(name)) return await mcp.call(name, args);
   return await executeLocalTool(name, args, settings.workspace);
 }
@@ -237,7 +239,8 @@ export async function runAgent(options: {
     catch (error) { mcpError = error instanceof Error ? error.message : String(error); }
   } else await mcp.ensure(settings);
 
-  const tools: ToolDefinition[] = [...LOCAL_TOOL_DEFINITIONS, ...mcp.definitions()];
+  const resultCache = new ToolResultCache();
+  const tools: ToolDefinition[] = [...LOCAL_TOOL_DEFINITIONS, INSPECT_TOOL_RESULT_DEFINITION, ...mcp.definitions()];
   const messages: ChatMessage[] = [
     { role: "system", content: await systemPrompt(settings, mcp) },
     ...trimHistory(options.history),
@@ -366,15 +369,27 @@ export async function runAgent(options: {
         ok = false;
         result = `Tool call denied by ${settings.approvalMode === "read-only" ? "read-only mode" : "the user"}. Continue without making this change, or explain what approval is needed.`;
       } else {
-        try { result = await executeTool(name, args, settings, mcp); }
+        try { result = await executeTool(name, args, settings, mcp, resultCache); }
         catch (error) {
           ok = false;
           result = `Tool error: ${error instanceof Error ? error.message : String(error)}`;
         }
       }
-      send({ type: "tool_result", tool: displayName, ok, result: preview(result), step });
-      evidence.push({ tool: displayName, ok, arguments: compactToolArguments(args), result: preview(result) });
-      messages.push({ role: "tool", tool_name: name, content: result });
+      const prepared = name === INSPECT_TOOL_RESULT_NAME
+        ? { content: result, cached: false, originalLength: result.length }
+        : resultCache.prepare(result, displayName);
+      if (prepared.cached) {
+        send({
+          type: "status",
+          message: `Large ${displayName} result cached (${prepared.originalLength.toLocaleString()} characters). Inspecting only relevant chunks…`,
+          step,
+          contextManaged: true,
+          resultHandle: prepared.id,
+        });
+      }
+      send({ type: "tool_result", tool: displayName, ok, result: preview(prepared.content), step, cached: prepared.cached, resultHandle: prepared.id });
+      evidence.push({ tool: displayName, ok, arguments: compactToolArguments(args), result: preview(prepared.content) });
+      messages.push({ role: "tool", tool_name: name, content: prepared.content });
     }
   }
   const unresolved = lastReview?.missing.length ? ` Still missing: ${lastReview.missing.join("; ")}` : "";
