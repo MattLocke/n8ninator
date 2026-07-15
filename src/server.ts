@@ -30,14 +30,14 @@ app.get("/vendor/marked.js", (_request, response) => response.sendFile(resolve(p
 app.get("/vendor/purify.js", (_request, response) => response.sendFile(resolve(projectRoot, "node_modules/dompurify/dist/purify.min.js")));
 app.use(express.static(publicRoot, { extensions: ["html"] }));
 
-app.get("/api/health", (_request, response) => response.json({ ok: true, app: "n8ninator", version: "0.1.0" }));
+app.get("/api/health", (_request, response) => response.json({ ok: true, app: "n8ninator", version: "0.2.0" }));
 
 app.get("/api/status", async (_request, response, next) => {
   try {
     const settings = await loadSettings();
     const ollama = await getOllamaStatus(settings.ollamaUrl);
     response.json({
-      app: { version: "0.1.0", settingsPath: SETTINGS_PATH },
+      app: { version: "0.2.0", settingsPath: SETTINGS_PATH },
       settings: publicSettings(settings),
       ollama,
       mcp: mcp.status(settings.n8nMcp.enabled),

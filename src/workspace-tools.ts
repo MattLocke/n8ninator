@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -51,6 +51,23 @@ export const LOCAL_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "verify_file",
+      description: "Deterministically verify exact workspace file contents, lines, and final-newline state. Use this after writing when the user specifies exact content or whitespace.",
+      parameters: {
+        type: "object",
+        required: ["path"],
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path." },
+          expected_content: { type: "string", description: "Optional exact UTF-8 content to compare byte-for-byte." },
+          expected_lines: { type: "array", items: { type: "string" }, description: "Optional exact lines without line terminators. Prefer this with final_newline when whitespace escaping could be ambiguous." },
+          final_newline: { type: "boolean", description: "Optional required final-newline state." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_files",
       description: "Search text files in the workspace for a literal or regular-expression pattern.",
       parameters: {
@@ -77,6 +94,23 @@ export const LOCAL_TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           path: { type: "string", description: "Workspace-relative file path." },
           content: { type: "string", description: "Complete new file contents." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file_lines",
+      description: "Create or replace a UTF-8 text file from exact lines and an explicit final-newline setting. Prefer this over write_file when line endings or escaped newline characters matter. Requires approval.",
+      parameters: {
+        type: "object",
+        required: ["path", "lines"],
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path." },
+          lines: { type: "array", items: { type: "string" }, description: "Exact lines without newline characters." },
+          final_newline: { type: "boolean", description: "Append a final newline. Defaults to true." },
+          line_ending: { type: "string", enum: ["lf", "crlf"], description: "Line-ending style. Defaults to lf." },
         },
       },
     },
@@ -145,7 +179,7 @@ export const LOCAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 ];
 
 export function localToolNeedsApproval(name: string): boolean {
-  return name === "write_file" || name === "replace_in_file" || name === "run_command";
+  return name === "write_file" || name === "write_file_lines" || name === "replace_in_file" || name === "run_command";
 }
 
 function asString(value: unknown, fallback = ""): string {
@@ -259,6 +293,58 @@ async function readWorkspaceFile(workspace: string, args: Record<string, unknown
   return lines.slice(start - 1, end).map((line, index) => `${String(start + index).padStart(5)} | ${line}`).join("\n");
 }
 
+async function verifyWorkspaceFile(workspace: string, args: Record<string, unknown>): Promise<string> {
+  const requested = asString(args.path);
+  if (!requested) throw new Error("path is required");
+  const hasExpectedContent = typeof args.expected_content === "string";
+  const hasExpectedLines = Array.isArray(args.expected_lines);
+  const hasFinalNewline = typeof args.final_newline === "boolean";
+  if (!hasExpectedContent && !hasExpectedLines && !hasFinalNewline) {
+    throw new Error("Provide expected_content, expected_lines, or final_newline to verify");
+  }
+  const { root, target } = await existingWorkspacePath(workspace, requested);
+  assertReadableFile(target);
+  const info = await stat(target);
+  if (!info.isFile()) throw new Error(`${requested} is not a file`);
+  if (info.size > MAX_READ_BYTES) throw new Error(`File is ${info.size} bytes; the verification limit is ${MAX_READ_BYTES} bytes.`);
+  const content = await readFile(target, "utf8");
+  if (content.includes("\0")) throw new Error("File appears to be binary");
+
+  const normalized = content.replace(/\r\n/g, "\n");
+  const endsWithNewline = /(?:\r\n|\n)$/.test(content);
+  const actualLines = content === "" ? [] : normalized.split("\n").slice(0, endsWithNewline ? -1 : undefined);
+  const expectedLines = hasExpectedLines
+    ? (args.expected_lines as unknown[]).map((line) => {
+      if (typeof line !== "string" || /[\r\n]/.test(line)) throw new Error("expected_lines entries must be strings without newline characters");
+      return line;
+    })
+    : undefined;
+  const contentMatch = hasExpectedContent ? content === args.expected_content : undefined;
+  const linesMatch = expectedLines ? expectedLines.length === actualLines.length && expectedLines.every((line, index) => line === actualLines[index]) : undefined;
+  const finalNewlineMatch = hasFinalNewline ? endsWithNewline === args.final_newline : undefined;
+  const suppliedChecks = [contentMatch, linesMatch, finalNewlineMatch].filter((value): value is boolean => typeof value === "boolean");
+  const exactMatch = suppliedChecks.every(Boolean);
+  const lineEnding = content.includes("\r\n")
+    ? content.replace(/\r\n/g, "").includes("\n") ? "mixed" : "crlf"
+    : content.includes("\n") ? "lf" : "none";
+  return JSON.stringify({
+    ok: exactMatch,
+    path: relative(root, target),
+    bytes: Buffer.byteLength(content),
+    sha256: createHash("sha256").update(content).digest("hex"),
+    lineCount: actualLines.length,
+    endsWithNewline,
+    lineEnding,
+    exactMatch,
+    checks: {
+      ...(contentMatch === undefined ? {} : { contentMatch }),
+      ...(linesMatch === undefined ? {} : { linesMatch }),
+      ...(finalNewlineMatch === undefined ? {} : { finalNewlineMatch }),
+    },
+    actualPreview: JSON.stringify(content.slice(0, 500)),
+  });
+}
+
 function globToRegExp(glob: string): RegExp {
   const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, ".");
   return new RegExp(`^${escaped}$`, "i");
@@ -326,6 +412,21 @@ async function writeWorkspaceFile(workspace: string, args: Record<string, unknow
   await writeFile(temporary, content, "utf8");
   await rename(temporary, target);
   return JSON.stringify({ ok: true, path: relative(root, target), bytes: Buffer.byteLength(content) });
+}
+
+async function writeWorkspaceFileLines(workspace: string, args: Record<string, unknown>): Promise<string> {
+  const requested = asString(args.path);
+  if (!requested) throw new Error("path is required");
+  if (!Array.isArray(args.lines)) throw new Error("lines must be an array of strings");
+  const lines = (args.lines as unknown[]).map((line) => {
+    if (typeof line !== "string" || /[\r\n]/.test(line)) throw new Error("lines entries must be strings without newline characters");
+    return line;
+  });
+  const finalNewline = args.final_newline !== false;
+  const lineEnding = args.line_ending === "crlf" ? "\r\n" : "\n";
+  const content = `${lines.join(lineEnding)}${finalNewline ? lineEnding : ""}`;
+  const result = JSON.parse(await writeWorkspaceFile(workspace, { path: requested, content })) as Record<string, unknown>;
+  return JSON.stringify({ ...result, lineCount: lines.length, finalNewline, lineEnding: args.line_ending === "crlf" ? "crlf" : "lf" });
 }
 
 async function replaceInWorkspaceFile(workspace: string, args: Record<string, unknown>): Promise<string> {
@@ -400,7 +501,7 @@ async function fetchUrl(args: Record<string, unknown>): Promise<string> {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Only HTTP(S) URLs are supported");
   const response = await fetch(url, {
-    headers: { "User-Agent": "n8ninator/0.1 (+https://github.com/MattLocke/n8ninator)" },
+    headers: { "User-Agent": "n8ninator/0.2 (+https://github.com/MattLocke/n8ninator)" },
     signal: AbortSignal.timeout(20_000),
     redirect: "follow",
   });
@@ -485,8 +586,10 @@ export async function executeLocalTool(name: string, args: Record<string, unknow
   switch (name) {
     case "workspace_tree": return await workspaceTree(workspace, args);
     case "read_file": return await readWorkspaceFile(workspace, args);
+    case "verify_file": return await verifyWorkspaceFile(workspace, args);
     case "search_files": return await searchFiles(workspace, args);
     case "write_file": return await writeWorkspaceFile(workspace, args);
+    case "write_file_lines": return await writeWorkspaceFileLines(workspace, args);
     case "replace_in_file": return await replaceInWorkspaceFile(workspace, args);
     case "run_command": return await runCommand(workspace, args);
     case "fetch_url": return await fetchUrl(args);

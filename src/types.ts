@@ -60,6 +60,8 @@ export interface AgentEvent {
     | "tool_result"
     | "approval_required"
     | "approval_resolved"
+    | "goal_review"
+    | "content_reset"
     | "done"
     | "error";
   [key: string]: unknown;

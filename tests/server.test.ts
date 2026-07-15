@@ -19,7 +19,7 @@ test("local server exposes health, prompt, and settings without a login", async 
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   const health = await fetch(`${base}/api/health`).then((response) => response.json());
-  assert.deepEqual(health, { ok: true, app: "n8ninator", version: "0.1.0" });
+  assert.deepEqual(health, { ok: true, app: "n8ninator", version: "0.2.0" });
 
   const promptResponse = await fetch(`${base}/api/system-prompt`);
   assert.equal(promptResponse.status, 200);

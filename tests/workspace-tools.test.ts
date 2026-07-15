@@ -26,6 +26,35 @@ test("workspace tools stay inside the root and support precise edits", async (t)
 
   await executeLocalTool("write_file", { path: "notes/check.md", content: "n8n workflow check\n" }, workspace);
   assert.equal(await readFile(resolve(workspace, "notes/check.md"), "utf8"), "n8n workflow check\n");
+  const verified = JSON.parse(await executeLocalTool("verify_file", {
+    path: "notes/check.md",
+    expected_lines: ["n8n workflow check"],
+    final_newline: true,
+  }, workspace)) as { exactMatch: boolean; checks: { linesMatch: boolean; finalNewlineMatch: boolean } };
+  assert.equal(verified.exactMatch, true);
+  assert.deepEqual(verified.checks, { linesMatch: true, finalNewlineMatch: true });
+
+  await writeFile(resolve(workspace, "literal-escape.txt"), String.raw`follow-through\n`);
+  const mismatch = JSON.parse(await executeLocalTool("verify_file", {
+    path: "literal-escape.txt",
+    expected_lines: ["follow-through"],
+    final_newline: true,
+  }, workspace)) as { exactMatch: boolean; endsWithNewline: boolean };
+  assert.equal(mismatch.exactMatch, false);
+  assert.equal(mismatch.endsWithNewline, false);
+
+  await executeLocalTool("write_file_lines", {
+    path: "line-writer.txt",
+    lines: ["follow-through"],
+    final_newline: true,
+  }, workspace);
+  assert.equal(await readFile(resolve(workspace, "line-writer.txt"), "utf8"), "follow-through\n");
+  const lineWriterVerified = JSON.parse(await executeLocalTool("verify_file", {
+    path: "line-writer.txt",
+    expected_lines: ["follow-through"],
+    final_newline: true,
+  }, workspace)) as { exactMatch: boolean };
+  assert.equal(lineWriterVerified.exactMatch, true);
 
   await assert.rejects(() => executeLocalTool("read_file", { path: "../../etc/passwd" }, workspace), /escapes the workspace/);
   await writeFile(resolve(workspace, ".env"), "SECRET=do-not-read\n");
