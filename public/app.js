@@ -61,6 +61,8 @@
     selectedModel: "gpt-oss:20b",
     streaming: false,
     controller: null,
+    streamRenderFrame: null,
+    streamRenderKinds: new Set(),
   };
 
   if (window.marked) window.marked.setOptions({ gfm: true, breaks: false });
@@ -151,21 +153,77 @@
     }).join("")}</div>`;
   }
 
+  function assistantMessageHtml(message, index) {
+    const reasoning = message.thinking ? `<details class="reasoning"><summary>Local reasoning trace</summary><pre>${escapeHtml(message.thinking)}</pre></details>` : "";
+    return `<article class="message assistant" data-message-index="${index}">
+      <div class="assistant-avatar">n</div>
+      <div class="assistant-body">
+        <div class="assistant-label">n8ninator</div>
+        <div data-message-reasoning>${reasoning}</div>
+        <div data-message-events>${toolEventsHtml(message.events)}</div>
+        <div class="message-content" data-message-content>${renderMarkdown(message.content)}</div>
+        <div data-message-actions>${message.content ? `<div class="message-actions"><button data-copy-message="${index}">Copy response</button></div>` : ""}</div>
+      </div>
+    </article>`;
+  }
+
   function renderMessages(keepBottom = true) {
     const session = currentSession();
     elements.welcome.classList.toggle("hidden", session.messages.length > 0);
     elements.messages.innerHTML = session.messages.map((message, index) => {
       if (message.role === "user") return `<article class="message user"><div class="user-bubble">${escapeHtml(message.content)}</div></article>`;
-      const reasoning = message.thinking ? `<details class="reasoning"><summary>Local reasoning trace</summary><pre>${escapeHtml(message.thinking)}</pre></details>` : "";
-      return `<article class="message assistant" data-message-index="${index}">
-        <div class="assistant-avatar">n</div>
-        <div class="assistant-body"><div class="assistant-label">n8ninator</div>${reasoning}${toolEventsHtml(message.events)}<div class="message-content">${renderMarkdown(message.content)}</div>
-        ${message.content ? `<div class="message-actions"><button data-copy-message="${index}">Copy response</button></div>` : ""}</div>
-      </article>`;
+      return assistantMessageHtml(message, index);
     }).join("");
     elements.messages.querySelectorAll("a").forEach((link) => { link.target = "_blank"; link.rel = "noreferrer noopener"; });
     renderHistory();
     if (keepBottom) requestAnimationFrame(() => { elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight; });
+  }
+
+  function updateStreamingAssistant(assistant, kinds) {
+    const index = currentSession().messages.indexOf(assistant);
+    const article = elements.messages.querySelector(`[data-message-index="${index}"]`);
+    if (!article) return renderMessages();
+    const wasNearBottom = elements.chatScroll.scrollHeight - elements.chatScroll.scrollTop - elements.chatScroll.clientHeight < 120;
+
+    if (kinds.has("thinking")) {
+      const slot = article.querySelector("[data-message-reasoning]");
+      let reasoning = slot.querySelector(".reasoning");
+      if (assistant.thinking && !reasoning) {
+        slot.innerHTML = '<details class="reasoning"><summary>Local reasoning trace</summary><pre></pre></details>';
+        reasoning = slot.querySelector(".reasoning");
+      }
+      const trace = reasoning?.querySelector("pre");
+      if (trace) trace.textContent = assistant.thinking || "";
+    }
+
+    if (kinds.has("events")) {
+      article.querySelector("[data-message-events]").innerHTML = toolEventsHtml(assistant.events);
+    }
+
+    if (kinds.has("content")) {
+      const content = article.querySelector("[data-message-content]");
+      content.innerHTML = renderMarkdown(assistant.content);
+      content.querySelectorAll("a").forEach((link) => { link.target = "_blank"; link.rel = "noreferrer noopener"; });
+    }
+
+    if (wasNearBottom) elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight;
+  }
+
+  function queueStreamingRender(assistant, ...kinds) {
+    kinds.forEach((kind) => state.streamRenderKinds.add(kind));
+    if (state.streamRenderFrame !== null) return;
+    state.streamRenderFrame = requestAnimationFrame(() => {
+      state.streamRenderFrame = null;
+      const pendingKinds = new Set(state.streamRenderKinds);
+      state.streamRenderKinds.clear();
+      updateStreamingAssistant(assistant, pendingKinds);
+    });
+  }
+
+  function cancelStreamingRender() {
+    if (state.streamRenderFrame !== null) cancelAnimationFrame(state.streamRenderFrame);
+    state.streamRenderFrame = null;
+    state.streamRenderKinds.clear();
   }
 
   function titleFromPrompt(prompt) {
@@ -286,39 +344,44 @@
 
   function handleAgentEvent(event, assistant) {
     assistant.events ||= [];
+    const renderKinds = [];
     if (event.type === "status") setComposerStatus(event.message || "Working…", true);
-    if (event.type === "thinking") assistant.thinking = (assistant.thinking || "") + (event.delta || "");
-    if (event.type === "delta") assistant.content += event.delta || "";
-    if (event.type === "content_reset") assistant.content = "";
+    if (event.type === "thinking") { assistant.thinking = (assistant.thinking || "") + (event.delta || ""); renderKinds.push("thinking"); }
+    if (event.type === "delta") { assistant.content += event.delta || ""; renderKinds.push("content"); }
+    if (event.type === "content_reset") { assistant.content = ""; renderKinds.push("content"); }
     if (event.type === "goal_review") {
       assistant.events.push({ kind: "goal", complete: event.complete, blocked: event.blocked, summary: event.summary, missing: event.missing, check: event.check });
+      renderKinds.push("events");
       if (event.complete) setComposerStatus("Goal check passed.");
       else if (event.blocked) setComposerStatus("Goal check found a blocker.");
       else setComposerStatus(event.nextAction || "Goal check found unfinished work. Continuing…", true);
     }
-    if (event.type === "tool_start") assistant.events.push({ kind: "tool", tool: event.tool, arguments: event.arguments, status: "running" });
+    if (event.type === "tool_start") { assistant.events.push({ kind: "tool", tool: event.tool, arguments: event.arguments, status: "running" }); renderKinds.push("events"); }
     if (event.type === "tool_result") {
       const match = [...assistant.events].reverse().find((item) => item.kind === "tool" && item.tool === event.tool && item.status === "running");
       if (match) { match.status = event.ok ? "ok" : "error"; match.result = event.result; }
       else assistant.events.push({ kind: "tool", tool: event.tool, result: event.result, status: event.ok ? "ok" : "error" });
+      renderKinds.push("events");
     }
-    if (event.type === "approval_required") assistant.events.push({ kind: "approval", id: event.id, tool: event.tool, arguments: event.arguments, status: "pending" });
+    if (event.type === "approval_required") { assistant.events.push({ kind: "approval", id: event.id, tool: event.tool, arguments: event.arguments, status: "pending" }); renderKinds.push("events"); }
     if (event.type === "approval_resolved") {
       const item = assistant.events.find((candidate) => candidate.kind === "approval" && candidate.id === event.id);
       if (item) item.status = event.approved ? "approved" : "denied";
+      renderKinds.push("events");
     }
     if (event.type === "done") {
       assistant.content = event.content || assistant.content;
       assistant.metrics = event.metrics;
+      renderKinds.push("content");
       setComposerStatus("");
     }
     if (event.type === "error") {
       assistant.content += `${assistant.content ? "\n\n" : ""}**Stopped:** ${event.error || "Unknown local agent error"}`;
+      renderKinds.push("content");
       setComposerStatus("");
     }
     currentSession().updatedAt = Date.now();
-    saveSessions();
-    renderMessages();
+    if (renderKinds.length) queueStreamingRender(assistant, ...renderKinds);
   }
 
   async function sendPrompt(text) {
@@ -367,6 +430,7 @@
         toast(error.message, "error");
       }
     } finally {
+      cancelStreamingRender();
       state.streaming = false;
       state.controller = null;
       elements.send.classList.remove("hidden");
