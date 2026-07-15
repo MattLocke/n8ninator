@@ -15,6 +15,7 @@ It has no accounts, cloud backend, telemetry, or hosted model dependency. The UI
 - Discover and call the official n8n MCP tools dynamically instead of relying on a stale hard-coded schema.
 - Ask before file writes, shell commands, workflow changes, executions, publishing, archiving, or other n8n mutations.
 - Stream answers, reasoning traces, tool calls, results, model downloads, and approvals in the browser.
+- Show elapsed-time liveness updates while Ollama is silent, automatically retry a request that stalls before producing output, and stop with a concrete recovery message instead of waiting forever.
 - Audit every candidate final answer against the original goal and real tool evidence, automatically continuing when the model stops at planning or partial work.
 - Keep recent chats in the browser's local storage. Nothing is sent to a n8ninator service.
 
@@ -195,6 +196,10 @@ Environment overrides:
 | `N8NINATOR_HOST` | `127.0.0.1` | Bind address |
 | `N8NINATOR_PORT` | `3210` | UI/server port |
 | `N8NINATOR_NO_OPEN` | unset | Set to `1` to prevent browser launch |
+| `N8NINATOR_MODEL_SILENCE_MS` | `120000` | Silence allowed before restarting a model request that has produced no output |
+| `N8NINATOR_MODEL_ACTIVE_SILENCE_MS` | `60000` | Silence allowed after a response has started before stopping with partial output preserved |
+| `N8NINATOR_MODEL_HEARTBEAT_MS` | `10000` | Interval for honest elapsed-time status updates while waiting on Ollama |
+| `N8NINATOR_REVIEW_TIMEOUT_MS` | `90000` | Maximum time for the separate completion review before its conservative fallback takes over |
 
 ## Troubleshooting
 
@@ -203,6 +208,10 @@ Open the Ollama macOS app, wait a few seconds, then reload n8ninator. Confirm `c
 
 **The selected model is not downloaded**  
 Open Settings and use **Download model**, or run `ollama pull gpt-oss:20b`.
+
+**The model appears stuck on “Waiting for local model…”**
+
+n8ninator reports how long Ollama has been quiet. After two minutes without any output it automatically restarts that model step once. If the retry also stalls, restart Ollama or select `qwen2.5-coder:14b`. If output had already started, n8ninator preserves the partial response and stops after one quiet minute rather than replaying and duplicating text.
 
 **The Mac swaps or becomes unresponsive**  
 Quit memory-heavy apps, reduce context to 8K, or use `qwen2.5-coder:14b`. Avoid Qwen3-Coder 30B on a 24 GB machine when reliability matters.

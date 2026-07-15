@@ -12,6 +12,18 @@ type EventWriter = (event: AgentEvent) => void;
 export interface AgentDependencies {
   streamChat?: typeof streamOllamaChat;
   goalReviewer?: GoalReviewer;
+  modelSilenceTimeoutMs?: number;
+  modelActiveSilenceTimeoutMs?: number;
+  modelHeartbeatMs?: number;
+}
+
+class ModelStallError extends Error {
+  constructor(public readonly hadOutput: boolean, public readonly timeoutMs: number) {
+    super(hadOutput
+      ? `The local model stopped producing output for ${Math.round(timeoutMs / 1_000)} seconds.`
+      : `The local model produced no output for ${Math.round(timeoutMs / 1_000)} seconds.`);
+    this.name = "ModelStallError";
+  }
 }
 
 interface PendingApproval {
@@ -75,6 +87,11 @@ function preview(value: string): string {
   return value.length > 2_000 ? `${value.slice(0, 2_000)}… (${value.length} chars)` : value;
 }
 
+function positiveDuration(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 async function systemPrompt(settings: AppSettings, mcp: N8nMcpManager): Promise<string> {
   const promptPath = resolve(process.env.N8NINATOR_PROMPT ?? resolve(process.cwd(), "prompts/n8n-system.md"));
   const base = await readFile(promptPath, "utf8");
@@ -114,6 +131,81 @@ Next action: ${review.nextAction || "Take the next concrete tool-backed step and
 Do not restate the plan or promise future work. Continue now using the available tools. Only produce another final response after the requested outcome is complete or you have a concrete blocker that requires the user.`;
 }
 
+async function streamWithWatchdog(options: {
+  settings: AppSettings;
+  messages: ChatMessage[];
+  tools: ToolDefinition[];
+  signal: AbortSignal;
+  send: EventWriter;
+  step: number;
+  streamChat: typeof streamOllamaChat;
+  silenceTimeoutMs: number;
+  activeSilenceTimeoutMs: number;
+  heartbeatMs: number;
+  onThinking: (delta: string) => void;
+  onContent: (delta: string) => void;
+}): Promise<Awaited<ReturnType<typeof streamOllamaChat>>> {
+  const controller = new AbortController();
+  const abortFromCaller = (): void => controller.abort(options.signal.reason);
+  options.signal.addEventListener("abort", abortFromCaller, { once: true });
+  let hadOutput = false;
+  let lastActivityAt = Date.now();
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  let rejectStall: ((error: Error) => void) | undefined;
+
+  const scheduleStall = (): void => {
+    if (stallTimer) clearTimeout(stallTimer);
+    const timeoutMs = hadOutput ? options.activeSilenceTimeoutMs : options.silenceTimeoutMs;
+    stallTimer = setTimeout(() => {
+      const error = new ModelStallError(hadOutput, timeoutMs);
+      rejectStall?.(error);
+      controller.abort(error);
+    }, timeoutMs);
+  };
+  const activity = (): void => {
+    lastActivityAt = Date.now();
+    scheduleStall();
+  };
+  const output = (callback: (delta: string) => void, delta: string): void => {
+    hadOutput = true;
+    activity();
+    callback(delta);
+  };
+  const stalled = new Promise<never>((_resolve, reject) => { rejectStall = reject; });
+  const heartbeat = setInterval(() => {
+    const quietMs = Date.now() - lastActivityAt;
+    if (quietMs < options.heartbeatMs * 0.8) return;
+    const quietSeconds = Math.max(1, Math.round(quietMs / 1_000));
+    options.send({
+      type: "status",
+      message: hadOutput
+        ? `Waiting for more model output… ${quietSeconds}s quiet`
+        : `Waiting for first model output… ${quietSeconds}s elapsed`,
+      step: options.step,
+      waiting: true,
+      quietSeconds,
+    });
+  }, options.heartbeatMs);
+  scheduleStall();
+
+  try {
+    const streaming = options.streamChat(
+      options.settings,
+      options.messages,
+      options.tools,
+      controller.signal,
+      (delta) => output(options.onThinking, delta),
+      (delta) => output(options.onContent, delta),
+      activity,
+    );
+    return await Promise.race([streaming, stalled]);
+  } finally {
+    if (stallTimer) clearTimeout(stallTimer);
+    clearInterval(heartbeat);
+    options.signal.removeEventListener("abort", abortFromCaller);
+  }
+}
+
 export async function runAgent(options: {
   settings: AppSettings;
   history: ChatMessage[];
@@ -126,6 +218,18 @@ export async function runAgent(options: {
   const { settings, mcp, approvals, signal, send } = options;
   const streamChat = options.dependencies?.streamChat ?? streamOllamaChat;
   const goalReviewer = options.dependencies?.goalReviewer ?? reviewGoal;
+  const silenceTimeoutMs = positiveDuration(
+    options.dependencies?.modelSilenceTimeoutMs ?? process.env.N8NINATOR_MODEL_SILENCE_MS,
+    120_000,
+  );
+  const activeSilenceTimeoutMs = positiveDuration(
+    options.dependencies?.modelActiveSilenceTimeoutMs ?? process.env.N8NINATOR_MODEL_ACTIVE_SILENCE_MS,
+    60_000,
+  );
+  const heartbeatMs = positiveDuration(
+    options.dependencies?.modelHeartbeatMs ?? process.env.N8NINATOR_MODEL_HEARTBEAT_MS,
+    10_000,
+  );
   let mcpError = "";
   if (settings.n8nMcp.enabled) {
     send({ type: "status", message: "Connecting to n8n MCP…" });
@@ -151,25 +255,52 @@ export async function runAgent(options: {
   const evidence: ToolEvidence[] = [];
   for (let step = 1; step <= settings.maxAgentSteps; step++) {
     if (signal.aborted) throw new Error("Generation stopped");
-    let thinkingStarted = false;
+    let outputStarted = false;
+    const announceOutput = (): void => {
+      if (outputStarted) return;
+      outputStarted = true;
+      send({ type: "status", message: "Model output started.", step });
+    };
     send({ type: "status", message: step === 1 ? "Reasoning locally…" : `Continuing agent step ${step}…`, step });
-    const response = await streamChat(
-      settings,
-      messages,
-      tools,
-      signal,
-      (delta) => {
-        if (!thinkingStarted) {
-          thinkingStarted = true;
-          send({ type: "status", message: "Reasoning locally…", step });
+    let response: Awaited<ReturnType<typeof streamOllamaChat>> | undefined;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await streamWithWatchdog({
+          settings,
+          messages,
+          tools,
+          signal,
+          send,
+          step,
+          streamChat,
+          silenceTimeoutMs,
+          activeSilenceTimeoutMs,
+          heartbeatMs,
+          onThinking: (delta) => {
+            announceOutput();
+            send({ type: "thinking", delta, step });
+          },
+          onContent: (delta) => {
+            announceOutput();
+            combinedContent += delta;
+            send({ type: "delta", delta, step });
+          },
+        });
+        break;
+      } catch (error) {
+        if (!(error instanceof ModelStallError)) throw error;
+        if (!error.hadOutput && attempt === 1) {
+          send({ type: "status", message: "The local model stalled before responding. Restarting this step once…", step, retrying: true });
+          continue;
         }
-        send({ type: "thinking", delta, step });
-      },
-      (delta) => {
-        combinedContent += delta;
-        send({ type: "delta", delta, step });
-      },
-    );
+        const attempts = attempt === 2 ? " after two attempts" : "";
+        const recovery = error.hadOutput
+          ? "The partial response was preserved. Try again; if this repeats, restart Ollama or select a smaller model."
+          : "Restart Ollama or select a smaller model, then try again.";
+        throw new Error(`${error.message}${attempts} ${recovery}`);
+      }
+    }
+    if (!response) throw new Error("The local model did not return a response.");
     finalMetrics = response.metrics;
     messages.push({
       role: "assistant",

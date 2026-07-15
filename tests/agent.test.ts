@@ -91,6 +91,89 @@ test("completion gate rejects a premature answer and resumes concrete work", asy
   assert.equal(done?.goalChecks, 2);
 });
 
+test("model watchdog reports silence and retries once before any output", async (t) => {
+  const workspace = await mkdtemp(resolve(tmpdir(), "n8ninator-watchdog-"));
+  const mcp = new N8nMcpManager();
+  t.after(async () => { await mcp.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  let chatCalls = 0;
+  const streamChat: typeof streamOllamaChat = async (_settings, _messages, _tools, signal, _onThinking, onContent) => {
+    chatCalls += 1;
+    if (chatCalls === 1) {
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }
+    onContent("Recovered after restarting the stalled request.");
+    return { role: "assistant", content: "Recovered after restarting the stalled request.", thinking: "", tool_calls: [], metrics: {} };
+  };
+  const completeReview: GoalReviewer = async () => ({
+    complete: true,
+    blocked: false,
+    summary: "The answer completed after recovery.",
+    missing: [],
+    nextAction: "",
+    source: "model",
+  });
+  const events: AgentEvent[] = [];
+
+  await runAgent({
+    settings: settings(workspace),
+    history: [{ role: "user", content: "Explain the workflow." }],
+    mcp,
+    approvals: new ApprovalBroker(),
+    signal: new AbortController().signal,
+    send: (event) => events.push(event),
+    dependencies: {
+      streamChat,
+      goalReviewer: completeReview,
+      modelSilenceTimeoutMs: 30,
+      modelActiveSilenceTimeoutMs: 30,
+      modelHeartbeatMs: 5,
+    },
+  });
+
+  assert.equal(chatCalls, 2);
+  assert.ok(events.some((event) => event.type === "status" && event.waiting === true));
+  assert.ok(events.some((event) => event.type === "status" && event.retrying === true));
+  assert.match(String(events.find((event) => event.type === "done")?.content), /Recovered/);
+});
+
+test("model watchdog preserves partial output instead of duplicating it", async (t) => {
+  const workspace = await mkdtemp(resolve(tmpdir(), "n8ninator-partial-stall-"));
+  const mcp = new N8nMcpManager();
+  t.after(async () => { await mcp.close(); await rm(workspace, { recursive: true, force: true }); });
+
+  let chatCalls = 0;
+  const streamChat: typeof streamOllamaChat = async (_settings, _messages, _tools, signal, _onThinking, onContent) => {
+    chatCalls += 1;
+    onContent("Partial response");
+    return await new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  };
+  const events: AgentEvent[] = [];
+
+  await assert.rejects(runAgent({
+    settings: settings(workspace),
+    history: [{ role: "user", content: "Explain the workflow." }],
+    mcp,
+    approvals: new ApprovalBroker(),
+    signal: new AbortController().signal,
+    send: (event) => events.push(event),
+    dependencies: {
+      streamChat,
+      modelSilenceTimeoutMs: 30,
+      modelActiveSilenceTimeoutMs: 30,
+      modelHeartbeatMs: 5,
+    },
+  }), /partial response was preserved/i);
+
+  assert.equal(chatCalls, 1);
+  assert.equal(events.filter((event) => event.type === "delta").length, 1);
+  assert.equal(events.filter((event) => event.retrying === true).length, 0);
+});
+
 test("conservative goal review does not accept planning as action completion", () => {
   const actionReview = conservativeGoalReview({
     history: [{ role: "user", content: "Please update the workflow file." }],

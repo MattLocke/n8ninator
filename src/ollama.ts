@@ -32,6 +32,11 @@ function baseUrl(value: string): string {
   return value.replace(/\/$/, "");
 }
 
+function positiveDuration(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 async function responseError(response: Response): Promise<Error> {
   let message = `${response.status} ${response.statusText}`;
   try {
@@ -97,6 +102,7 @@ export async function streamOllamaChat(
   signal: AbortSignal,
   onThinking: (delta: string) => void,
   onContent: (delta: string) => void,
+  onActivity?: () => void,
 ): Promise<StreamedAssistantMessage> {
   const body: Record<string, unknown> = {
     model: settings.model,
@@ -124,6 +130,7 @@ export async function streamOllamaChat(
   const toolCalls: OllamaToolCall[] = [];
   let metrics: Record<string, unknown> = {};
   await consumeNdjson(response, (chunk) => {
+    onActivity?.();
     const message = typeof chunk.message === "object" && chunk.message !== null ? chunk.message as Record<string, unknown> : {};
     if (typeof message.thinking === "string" && message.thinking) {
       thinking += message.thinking;
@@ -164,11 +171,13 @@ export async function generateOllamaJson<T>(
   };
   if (/gpt-oss/i.test(settings.model)) body.think = "low";
   else if (/qwen3/i.test(settings.model)) body.think = true;
+  const reviewTimeoutMs = positiveDuration(process.env.N8NINATOR_REVIEW_TIMEOUT_MS, 90_000);
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(reviewTimeoutMs)]);
   const response = await fetch(`${baseUrl(settings.ollamaUrl)}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal,
+    signal: requestSignal,
   });
   if (!response.ok) throw await responseError(response);
   const payload = await response.json() as OllamaChatResponse;

@@ -111,7 +111,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .assistant-body { min-width: 0; padding-top: 3px; }
 .assistant-label { margin-bottom: 9px; color: var(--dim); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; }
 .message-content { color: #e9e4df; font-size: 14px; line-height: 1.68; overflow-wrap: anywhere; }
-.message-content:empty::after { content: "Thinking…"; color: var(--dim); animation: pulse 1.1s ease-in-out infinite; }
+.message-content:empty::after { content: "Waiting for local model…"; color: var(--dim); }
 @keyframes pulse { 50% { opacity: .45; } }
 .message-content p { margin: 0 0 12px; }
 .message-content p:last-child { margin-bottom: 0; }
