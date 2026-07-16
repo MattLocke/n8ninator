@@ -17,6 +17,7 @@ It has no accounts, cloud backend, telemetry, or hosted model dependency. The UI
 - Stream answers, reasoning traces, tool calls, results, model downloads, and approvals in the browser.
 - Show elapsed-time liveness updates while Ollama is silent, automatically retry a request that stalls before producing output, and stop with a concrete recovery message instead of waiting forever.
 - Keep large MCP workflow responses out of the main prompt, with an in-memory cache the model can search or read in bounded chunks.
+- Independently re-read and audit every MCP workflow mutation before allowing the agent to claim it succeeded.
 - Audit every candidate final answer against the original goal and real tool evidence, automatically continuing when the model stops at planning or partial work.
 - Keep recent chats in the browser's local storage. Nothing is sent to a n8ninator service.
 
@@ -160,6 +161,16 @@ Exact file-content requests get an additional deterministic gate. `write_file_li
 Large workflow-detail responses can exceed the practical prompt budget of a local model even when the configured context window appears large enough. n8ninator automatically keeps tool results over 8,000 characters in a per-task in-memory cache. The model receives a bounded beginning/end excerpt and a temporary handle, then uses `inspect_tool_result` to search for the relevant workflow name, node, ID, expression, or field. Sequential reads are also available when a search is insufficient.
 
 This prevents every later model step from reprocessing an entire workflow payload. Cached results live only for the active request, are never written to disk, and expire when that request ends.
+
+## Independent workflow QA
+
+An `update_workflow` success response is not accepted as proof by itself. Before changing an existing workflow, n8ninator captures its current version when possible. After the mutation, it makes a separate `get_workflow_details` call and deterministically checks the freshly saved workflow.
+
+The auditor verifies version changes plus the actual requested node parameters, JSON-pointer values, added, removed, and renamed nodes, connections, positions, disabled state, node settings, and workflow metadata. It also verifies create, publish, unpublish, and archive outcomes. The UI displays a distinct **Workflow QA passed** or **Workflow QA failed** receipt with each check.
+
+A failed audit is added to the evidence ledger as a failed mutation and fed back to the agent. The completion controller has a hard deterministic gate: it cannot accept an MCP workflow mutation unless an independent audit has passed. Credential references are intentionally stripped from `get_workflow_details`, so credential-only changes are reported as not independently observable instead of being falsely certified.
+
+This follows n8n's documented contracts for [`get_workflow_details`](https://docs.n8n.io/advanced-ai/mcp/mcp_tools_reference/#get_workflow_details) and atomic [`update_workflow`](https://docs.n8n.io/advanced-ai/mcp/mcp_tools_reference/#update_workflow) operations.
 
 ## Architecture
 

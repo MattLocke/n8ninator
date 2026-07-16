@@ -61,6 +61,7 @@ export interface AgentEvent {
     | "approval_required"
     | "approval_resolved"
     | "goal_review"
+    | "mutation_audit"
     | "content_reset"
     | "done"
     | "error";

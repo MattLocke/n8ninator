@@ -138,6 +138,11 @@
           : "";
         return `<div class="goal-event ${status}"><div class="goal-event-head"><span>${event.complete ? "✓" : event.blocked ? "!" : "↻"}</span><strong>${title}</strong><small>check ${escapeHtml(event.check || 1)}</small></div><p>${escapeHtml(event.summary || "")}</p>${missing}</div>`;
       }
+      if (event.kind === "audit") {
+        const findings = [...(event.checks || []).map((item) => `✓ ${item}`), ...(event.failures || []).map((item) => `! ${item}`)];
+        const list = findings.length ? `<ul>${findings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "";
+        return `<div class="goal-event ${event.passed ? "complete" : "blocked"}"><div class="goal-event-head"><span>${event.passed ? "✓" : "!"}</span><strong>${event.passed ? "Workflow QA passed" : "Workflow QA failed"}</strong><small>${escapeHtml(event.workflowId || "n8n")}</small></div><p>${escapeHtml(event.summary || "")}</p>${list}</div>`;
+      }
       if (event.kind === "approval") {
         const pending = event.status === "pending";
         return `<div class="tool-event approval-event ${pending ? "" : event.status === "approved" ? "ok" : "error"}">
@@ -355,6 +360,11 @@
       if (event.complete) setComposerStatus("Goal check passed.");
       else if (event.blocked) setComposerStatus("Goal check found a blocker.");
       else setComposerStatus(event.nextAction || "Goal check found unfinished work. Continuing…", true);
+    }
+    if (event.type === "mutation_audit") {
+      assistant.events.push({ kind: "audit", passed: event.passed, workflowId: event.workflowId, summary: event.summary, checks: event.checks, failures: event.failures });
+      renderKinds.push("events");
+      setComposerStatus(event.passed ? "Workflow QA passed." : "Workflow QA failed; continuing…", !event.passed);
     }
     if (event.type === "tool_start") { assistant.events.push({ kind: "tool", tool: event.tool, arguments: event.arguments, status: "running" }); renderKinds.push("events"); }
     if (event.type === "tool_result") {

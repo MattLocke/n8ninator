@@ -40,8 +40,9 @@ function mcpResultText(result: unknown): string {
       else textParts.push(JSON.stringify(block));
     } else textParts.push(String(item));
   }
-  if (record.structuredContent !== undefined) textParts.push(JSON.stringify(record.structuredContent));
-  const body = textParts.join("\n") || JSON.stringify(record);
+  const body = record.structuredContent !== undefined
+    ? JSON.stringify(record.structuredContent)
+    : textParts.join("\n") || JSON.stringify(record);
   return record.isError === true ? JSON.stringify({ isError: true, content: body }) : body;
 }
 
@@ -118,6 +119,10 @@ export class N8nMcpManager {
 
   remoteName(exposedName: string): string | undefined {
     return this.tools.get(exposedName)?.remoteName;
+  }
+
+  exposedName(remoteName: string): string | undefined {
+    return [...this.tools.values()].find((tool) => tool.remoteName === remoteName)?.exposedName;
   }
 
   async call(exposedName: string, args: Record<string, unknown>): Promise<string> {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import { ApprovalBroker, runAgent } from "../src/agent.js";
-import { conservativeGoalReview, requiresExactFileVerification, reviewGoal, type GoalReview, type GoalReviewer } from "../src/goal-review.js";
+import { conservativeGoalReview, hasPassingWorkflowMutationAudit, requiresExactFileVerification, reviewGoal, type GoalReview, type GoalReviewer } from "../src/goal-review.js";
 import { N8nMcpManager } from "../src/mcp-manager.js";
 import { streamOllamaChat } from "../src/ollama.js";
 import type { AgentEvent, AppSettings, OllamaToolCall } from "../src/types.js";
@@ -263,4 +263,39 @@ test("exact file goals require deterministic verification before semantic review
 test("an exact reply after reading a file is not mistaken for an exact file-write goal", () => {
   assert.equal(requiresExactFileVerification("Read package-lock.json, then reply with exactly CACHE_OK."), false);
   assert.equal(requiresExactFileVerification("Create exact.txt containing exactly one line and a final newline."), true);
+});
+
+test("workflow mutation completion requires a passing independent audit", async () => {
+  const failedAudit = { tool: "QA · update_workflow", ok: false, arguments: { workflowId: "wf-1" }, result: "QA failed" };
+  assert.equal(hasPassingWorkflowMutationAudit([failedAudit]), false);
+  assert.equal(hasPassingWorkflowMutationAudit([{ ...failedAudit, ok: true, result: "QA passed" }]), true);
+
+  const result = await reviewGoal({
+    settings: settings(process.cwd()),
+    history: [{ role: "user", content: "Update workflow wf-1." }],
+    candidate: "The workflow was updated.",
+    evidence: [failedAudit],
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.source, "deterministic");
+  assert.match(result.summary, /post-mutation QA is still failing/i);
+});
+
+test("a passing audit cannot mask a later failure or a different failed workflow action", async () => {
+  const base = { arguments: { workflowId: "wf-1" }, result: "QA receipt" };
+  const result = await reviewGoal({
+    settings: settings(process.cwd()),
+    history: [{ role: "user", content: "Update and publish workflow wf-1." }],
+    candidate: "Everything is done.",
+    evidence: [
+      { ...base, tool: "QA · update_workflow", ok: false },
+      { ...base, tool: "QA · update_workflow", ok: true },
+      { ...base, tool: "QA · publish_workflow", ok: false },
+    ],
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.complete, false);
+  assert.match(result.summary, /publish_workflow on wf-1/i);
+  assert.doesNotMatch(result.summary, /update_workflow on wf-1/i);
 });

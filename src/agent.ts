@@ -6,6 +6,7 @@ import { N8nMcpManager, mcpToolNeedsApproval } from "./mcp-manager.js";
 import { streamOllamaChat } from "./ollama.js";
 import { INSPECT_TOOL_RESULT_DEFINITION, INSPECT_TOOL_RESULT_NAME, ToolResultCache } from "./tool-result-cache.js";
 import type { AgentEvent, AppSettings, ChatMessage, OllamaToolCall, ToolDefinition } from "./types.js";
+import { auditWorkflowMutation, isAuditedWorkflowMutation, workflowIdForMutation, type WorkflowAudit } from "./workflow-auditor.js";
 import { compactToolArguments, executeLocalTool, LOCAL_TOOL_DEFINITIONS, localToolNeedsApproval } from "./workspace-tools.js";
 
 type EventWriter = (event: AgentEvent) => void;
@@ -365,6 +366,15 @@ export async function runAgent(options: {
 
       let result: string;
       let ok = true;
+      let beforeDetails: string | undefined;
+      const auditedMutation = Boolean(remoteName && isAuditedWorkflowMutation(remoteName));
+      const detailsTool = auditedMutation ? mcp.exposedName("get_workflow_details") : undefined;
+      const beforeWorkflowId = remoteName ? workflowIdForMutation(remoteName, args) : "";
+      if (allowed && auditedMutation && detailsTool && beforeWorkflowId) {
+        send({ type: "status", message: `QA auditor: capturing workflow ${beforeWorkflowId} before the change…`, step, auditing: true });
+        try { beforeDetails = await mcp.call(detailsTool, { workflowId: beforeWorkflowId }); }
+        catch { /* the post-mutation snapshot can still verify the requested state */ }
+      }
       if (!allowed) {
         ok = false;
         result = `Tool call denied by ${settings.approvalMode === "read-only" ? "read-only mode" : "the user"}. Continue without making this change, or explain what approval is needed.`;
@@ -374,6 +384,36 @@ export async function runAgent(options: {
           ok = false;
           result = `Tool error: ${error instanceof Error ? error.message : String(error)}`;
         }
+      }
+      let audit: WorkflowAudit | undefined;
+      if (ok && remoteName && auditedMutation) {
+        const workflowId = workflowIdForMutation(remoteName, args, result);
+        let afterDetails: string | undefined;
+        if (detailsTool && workflowId) {
+          send({ type: "status", message: `QA auditor: re-reading workflow ${workflowId} from n8n…`, step, auditing: true });
+          try { afterDetails = await mcp.call(detailsTool, { workflowId }); }
+          catch { /* represented as a failed audit below */ }
+        }
+        audit = auditWorkflowMutation({
+          remoteName,
+          arguments: args,
+          mutationResult: result,
+          beforeDetails,
+          afterDetails,
+        });
+        send({
+          type: "mutation_audit",
+          passed: audit.passed,
+          workflowId: audit.workflowId,
+          summary: audit.summary,
+          checks: audit.checks,
+          failures: audit.failures,
+          beforeVersion: audit.beforeVersion,
+          afterVersion: audit.afterVersion,
+          step,
+        });
+        const findings = [...audit.checks.map((check) => `PASS: ${check}`), ...audit.failures.map((failure) => `FAIL: ${failure}`)];
+        result = `${result}\n\n## Independent post-mutation QA\n${audit.summary}\n${findings.map((finding) => `- ${finding}`).join("\n")}\n\n${audit.passed ? "The saved n8n state independently confirms this mutation." : "Do not claim this workflow was updated. Correct the mutation or report that QA could not verify it."}`;
       }
       const prepared = name === INSPECT_TOOL_RESULT_NAME
         ? { content: result, cached: false, originalLength: result.length }
@@ -388,7 +428,13 @@ export async function runAgent(options: {
         });
       }
       send({ type: "tool_result", tool: displayName, ok, result: preview(prepared.content), step, cached: prepared.cached, resultHandle: prepared.id });
-      evidence.push({ tool: displayName, ok, arguments: compactToolArguments(args), result: preview(prepared.content) });
+      evidence.push({ tool: displayName, ok: ok && (audit?.passed ?? true), arguments: compactToolArguments(args), result: preview(prepared.content) });
+      if (audit) evidence.push({
+        tool: `QA · ${remoteName}`,
+        ok: audit.passed,
+        arguments: { workflowId: audit.workflowId, beforeVersion: audit.beforeVersion, afterVersion: audit.afterVersion },
+        result: preview(`${audit.summary}\n${[...audit.checks, ...audit.failures].join("\n")}`),
+      });
       messages.push({ role: "tool", tool_name: name, content: prepared.content });
     }
   }

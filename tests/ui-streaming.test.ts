@@ -15,6 +15,8 @@ test("streaming patches only the active assistant message", async () => {
   assert.doesNotMatch(handler, /renderMessages\(/, "token events must not rebuild the full message list");
   assert.match(source, /data-message-content/);
   assert.match(source, /requestAnimationFrame\(\(\) => \{/);
+  assert.match(source, /event\.type === "mutation_audit"/);
+  assert.match(source, /Workflow QA passed/);
   assert.match(styles, /content: "Waiting for local model…"/);
   assert.doesNotMatch(styles, /message-content:empty::after[^}]+animation:/);
 });

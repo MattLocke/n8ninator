@@ -115,8 +115,37 @@ function hasPassingExactFileVerification(evidence: ToolEvidence[]): boolean {
   return evidence.some((item) => item.ok && item.tool === "verify_file" && /"exactMatch":true/.test(item.result));
 }
 
+export function hasPassingWorkflowMutationAudit(evidence: ToolEvidence[]): boolean {
+  return evidence.some((item) => item.ok && /^QA · (create_workflow_from_code|update_workflow|publish_workflow|unpublish_workflow|archive_workflow)$/.test(item.tool));
+}
+
+function unresolvedWorkflowMutationAudits(evidence: ToolEvidence[]): ToolEvidence[] {
+  const latestByWorkflowAction = new Map<string, ToolEvidence>();
+  for (const item of evidence) {
+    if (!/^QA · (create_workflow_from_code|update_workflow|publish_workflow|unpublish_workflow|archive_workflow)$/.test(item.tool)) continue;
+    const workflowId = typeof item.arguments.workflowId === "string" ? item.arguments.workflowId : "(unknown workflow)";
+    latestByWorkflowAction.set(`${item.tool}:${workflowId}`, item);
+  }
+  return [...latestByWorkflowAction.values()].filter((item) => !item.ok);
+}
+
 function deterministicRequirement(input: GoalReviewInput): GoalReview | undefined {
   const request = latestUserRequest(input.history);
+  const unresolvedAudits = unresolvedWorkflowMutationAudits(input.evidence);
+  if (unresolvedAudits.length > 0) {
+    const labels = unresolvedAudits.map((item) => {
+      const workflowId = typeof item.arguments.workflowId === "string" ? item.arguments.workflowId : "unknown workflow";
+      return `${item.tool.replace("QA · ", "")} on ${workflowId}`;
+    });
+    return {
+      complete: false,
+      blocked: false,
+      summary: `Independent post-mutation QA is still failing for: ${labels.join(", ")}.`,
+      missing: labels.map((label) => `A fresh get_workflow_details snapshot that proves ${label} exists in saved n8n state.`),
+      nextAction: "Correct or retry the workflow mutation, then require the post-mutation QA auditor to pass before claiming success.",
+      source: "deterministic",
+    };
+  }
   if (likelyInformationOnly(request) || !requiresExactFileVerification(request) || hasPassingExactFileVerification(input.evidence)) return undefined;
   return {
     complete: false,
